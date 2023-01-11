@@ -181,6 +181,7 @@
     <addaction name="menu_Frame_Advance"/>
     <addaction name="separator"/>
     <addaction name="action_Capture_Screenshot"/>
+    <addaction name="action_Connect_CTroll3D"/>
     <addaction name="action_Dump_Video"/>
    </widget>
    <widget class="QMenu" name="menu_Help">
@@ -384,6 +385,14 @@
    </property>
    <property name="text">
     <string>Capture Screenshot</string>
+   </property>
+  </action>
+  <action name="action_Connect_CTroll3D">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="text">
+    <string>Connect CTroll3D</string>
    </property>
   </action>
   <action name="action_Dump_Video">
