@@ -16,6 +16,8 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/input.h"
+#include "core/frontend/ctroll3d/interface.h"
+#include "core/frontend/ctroll3d/factory.h"
 #include "core/hle/service/service.h"
 
 namespace Core {
@@ -306,6 +308,9 @@ public:
     static constexpr u64 gyroscope_update_ticks = BASE_CLOCK_RATE_ARM11 / 101;
 
 private:
+    int CreateSocket(unsigned short port, char *addr);
+    void CheckCTroll3D(CTroll3DInfo *info);
+
     void LoadInputDevices();
     void UpdatePadCallback(std::uintptr_t user_data, s64 cycles_late);
     void UpdateAccelerometerCallback(std::uintptr_t user_data, s64 cycles_late);
@@ -354,7 +359,9 @@ private:
     std::unique_ptr<Input::MotionDevice> motion_device;
     std::unique_ptr<Input::TouchDevice> touch_device;
     std::unique_ptr<Input::TouchDevice> touch_btn_device;
-
+    
+    CTroll3DInfo ctroll3dInfo = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    
     template <class Archive>
     void serialize(Archive& ar, const unsigned int);
     friend class boost::serialization::access;
