@@ -105,6 +105,10 @@ add_library(core STATIC
     frontend/camera/factory.h
     frontend/camera/interface.cpp
     frontend/camera/interface.h
+    frontend/ctroll3d/factory.cpp
+    frontend/ctroll3d/factory.h
+    frontend/ctroll3d/interface.cpp
+    frontend/ctroll3d/interface.h
     frontend/emu_window.cpp
     frontend/emu_window.h
     frontend/framebuffer_layout.cpp
