@@ -36,6 +36,11 @@ void* g_screenshot_bits;
 std::function<void()> g_screenshot_complete_callback;
 Layout::FramebufferLayout g_screenshot_framebuffer_layout;
 
+void* g_ctroll3d_bits;
+std::function<int(char *)> g_ctroll3d_complete_callback;
+Layout::FramebufferLayout g_ctroll3d_framebuffer_layout;
+char *g_ctroll3d_addr;
+
 Memory::MemorySystem* g_memory;
 
 /// Initialize the video core
@@ -78,6 +83,18 @@ void RequestScreenshot(void* data, std::function<void()> callback,
     g_screenshot_complete_callback = std::move(callback);
     g_screenshot_framebuffer_layout = layout;
     g_renderer_screenshot_requested = true;
+}
+
+void RequestCTroll3D(void* data, std::function<uint8_t(char *)> callback,  const char *address,
+                      const Layout::FramebufferLayout& layout) {
+
+    g_ctroll3d_bits = data;
+    g_ctroll3d_complete_callback = std::move(callback);
+    g_ctroll3d_framebuffer_layout = layout;
+    if (g_ctroll3d_addr) {
+        free(g_ctroll3d_addr);
+    }
+    g_ctroll3d_addr = strdup(address);
 }
 
 u16 GetResolutionScaleFactor() {
