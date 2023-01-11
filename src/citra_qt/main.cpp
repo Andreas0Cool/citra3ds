@@ -30,6 +30,7 @@
 #include "citra_qt/bootmanager.h"
 #include "citra_qt/camera/qt_multimedia_camera.h"
 #include "citra_qt/camera/still_image_camera.h"
+#include "citra_qt/ctroll3d/qt_ctroll3d.h"
 #include "citra_qt/cheats.h"
 #include "citra_qt/compatdb.h"
 #include "citra_qt/compatibility_list.h"
@@ -823,6 +824,8 @@ void GMainWindow::ConnectMenuEvents() {
     });
     connect(ui->action_Capture_Screenshot, &QAction::triggered, this,
             &GMainWindow::OnCaptureScreenshot);
+    connect(ui->action_Connect_CTroll3D, &QAction::triggered, this,
+            &GMainWindow::OnConnectCTroll3D);
 
 #ifdef ENABLE_FFMPEG_VIDEO_DUMPER
     connect(ui->action_Dump_Video, &QAction::triggered, [this] {
@@ -1679,7 +1682,6 @@ void GMainWindow::OnMenuRecentFile() {
 
 void GMainWindow::OnStartGame() {
     Camera::QtMultimediaCameraHandler::ResumeCameras();
-
     PreventOSSleep();
 
     emu_thread->SetRunning(true);
@@ -1698,6 +1700,7 @@ void GMainWindow::OnStartGame() {
     ui->action_Load_Amiibo->setEnabled(true);
     ui->action_Report_Compatibility->setEnabled(true);
     ui->action_Capture_Screenshot->setEnabled(true);
+    ui->action_Connect_CTroll3D->setEnabled(true);
 
     discord_rpc->Update();
 
@@ -2121,6 +2124,16 @@ void GMainWindow::OnCaptureScreenshot() {
     auto* const screenshot_window = secondary_window->HasFocus() ? secondary_window : render_window;
     screenshot_window->CaptureScreenshot(UISettings::values.screenshot_resolution_factor.GetValue(),
                                          QString::fromStdString(path));
+    OnStartGame();
+}
+void GMainWindow::OnConnectCTroll3D() {
+    OnPauseGame();
+    bool ok;
+    QString text = QInputDialog::getText(this, tr("3DS Address"),
+                                         tr("IP:"), QLineEdit::Normal,
+                                         tr("192.168.x.x"), &ok);
+
+    render_window->ConnectCTroll3D(text);
     OnStartGame();
 }
 
@@ -2642,6 +2655,9 @@ int main(int argc, char* argv[]) {
     Camera::RegisterFactory("image", std::make_unique<Camera::StillImageCameraFactory>());
     Camera::RegisterFactory("qt", std::make_unique<Camera::QtMultimediaCameraFactory>());
     Camera::QtMultimediaCameraHandler::Init();
+    
+    // Register CTroll3DFactory
+    CTroll3D::RegisterFactory("ctroll3d", std::make_unique<CTroll3D::QtCTroll3DFactory>());
 
     // Register frontend applets
     Frontend::RegisterDefaultApplets();
