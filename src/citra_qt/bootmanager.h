@@ -192,6 +192,8 @@ public:
 
     void CaptureScreenshot(u32 res_scale, const QString& screenshot_path);
 
+    void ConnectCTroll3D(const QString& address);
+
 public slots:
 
     void OnEmulationStarting(EmuThread* emu_thread);
@@ -217,6 +219,8 @@ private:
     void TouchEndEvent();
 
     void OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) override;
+    
+    static uint8_t processFrameData(const Layout::FramebufferLayout& layout, char *frameData, const QString& address);
 
     std::unique_ptr<GraphicsContext> core_context;
 
@@ -234,6 +238,10 @@ private:
 
     /// Temporary storage of the screenshot taken
     QImage screenshot_image;
+    
+    /// Temporary storage of the screen
+    QImage screen_image;
+
     bool first_frame = false;
     bool has_focus = false;
 
