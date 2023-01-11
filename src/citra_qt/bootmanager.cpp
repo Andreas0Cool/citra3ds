@@ -441,6 +441,268 @@ void GRenderWindow::CaptureScreenshot(u32 res_scale, const QString& screenshot_p
         layout);
 }
 
+#define PORT 6543
+
+#include <QTcpSocket>
+#include <QAbstractSocket>
+int socketSend(QTcpSocket& sock, const char *data, int sz) {
+    if (sock.state() != QAbstractSocket::ConnectedState) return 0;
+
+    sock.write(data, sz);
+    sock.waitForBytesWritten();
+
+    return 1;
+}
+
+uint8_t readConfirmation(QTcpSocket& sock) {
+    sock.waitForReadyRead(0);
+    if (sock.bytesAvailable() > 0) {
+        char result;
+        int rd = sock.read(&result, 1);
+        if (rd > 0) return result;
+    }
+
+    return 0;
+}
+
+#include <QBuffer>
+#define DECLJPEGOUTBUF(var) QByteArray var
+const char *jpegCompress(unsigned char *data, int width, int height, int quality, QByteArray *outBuf, unsigned long *outSize) {
+    QImage img = QImage(data, width, height, QImage::Format_RGB888);
+
+    outBuf->resize(0);
+    QBuffer buffer(outBuf);
+    buffer.open(QIODevice::WriteOnly);
+    img.save(&buffer, "JPG", quality);
+    buffer.close();
+
+    *outSize = outBuf->size();
+    return outBuf->constData();
+}
+
+//#define MIN_SQDIFF 128
+//#define MIN_SQDIFF (8 * 8 * 3 * 2)
+#define MIN_SQDIFF (8 * 8 * 3)
+int squareDiff(unsigned char *ptr1, unsigned char *ptr2, int rowStride) {
+    int diff = 0;
+
+    for (int i=0; i<8; i++) {
+        for (int j=0; j<8; j++) {
+            diff += abs(ptr1[0] - ptr2[0]);
+            diff += abs(ptr1[1] - ptr2[1]);
+            diff += abs(ptr1[2] - ptr2[2]);
+            if (diff > MIN_SQDIFF) return 1;
+            ptr1 += 3;
+            ptr2 += 3;
+        }
+        ptr1 += rowStride - (8 * 3);
+        ptr2 += rowStride - (8 * 3);
+    }
+
+    return 0;
+}
+
+int copySquare(unsigned char *dst, unsigned char *src, int rowStride) {
+    for (int i=0; i<8; i++) {
+        for (int j=0; j<8; j++) {
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst += 3;
+            src += 3;
+        }
+        dst += rowStride - (8 * 3);
+        src += rowStride - (8 * 3);
+    }
+
+    return 0;
+}
+
+
+unsigned char diffBuf[240 * 320 * 3];
+unsigned char diffMap[((240 / 8) * (320 / 8)) / 8];
+int putSquare(unsigned char *dst, unsigned char *src, int rowStride) {
+    for (int i=0; i<8; i++) {
+        for (int j=0; j<8; j++) {
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+            dst += 3;
+            src += 3;
+        }
+        src += rowStride - (8 * 3);
+    }
+
+    return 0;
+}
+
+unsigned char *lastImage = 0;
+int16_t imageDiff(unsigned char *currentImage, int width, int height) {
+    int16_t numSqDiff = 0;
+    int rowStride = width * 3;
+    int mapPos = 0;
+    int mapMask = 0x01;
+
+    unsigned char *lPtr = lastImage;
+    unsigned char *cPtr = currentImage;
+
+    for (int i=0; i<height; i+=8) {
+        for (int j=0; j<width; j+=8) {
+            int sDiff = squareDiff(lPtr, cPtr, rowStride);
+            if (sDiff) {
+                diffMap[mapPos] |= mapMask;
+                copySquare(lPtr, cPtr, rowStride);
+                putSquare(diffBuf + 8 * 8 * 3 * numSqDiff, cPtr, rowStride);
+                ++numSqDiff;
+            } else {
+                diffMap[mapPos] &= ~mapMask;
+            }
+            if (mapMask == 0x80) {mapMask = 0x01; mapPos++;}
+            else mapMask <<= 1;
+            lPtr += 8 * 3;
+            cPtr += 8 * 3;
+        }
+        lPtr += (8 * rowStride) - rowStride;
+        cPtr += (8 * rowStride) - rowStride;
+    }
+
+    return numSqDiff;
+}
+
+#define FM_NONE 0
+#define FM_FULL 1
+#define FM_DIFF 2
+#define FM_CHECKER 3
+#define FM_CHECKER_COMPL 4
+
+uint8_t GRenderWindow::processFrameData(const Layout::FramebufferLayout& layout, char *frameData, const QString& address) {
+    static DECLJPEGOUTBUF(outBuf);
+    static unsigned long outSize = 0;
+    static DECLJPEGOUTBUF(outDiffBuf);
+    static unsigned long outDiffSize = 0;
+    static int forceFrameCount = 0;
+    static int checker = 0;
+    static uint16_t lastFrameMode = FM_NONE;
+
+    static QTcpSocket sock;
+    static unsigned int waitConnection = 0;
+
+    if (sock.state() != QAbstractSocket::ConnectedState) {
+        if (!waitConnection) {
+            waitConnection = 300;
+            sock.connectToHost(address, PORT);
+            sock.waitForConnected(1000);
+        }
+        else waitConnection--;
+    }
+
+    if (!frameData) {
+        return readConfirmation(sock);
+    }
+
+    int width = layout.width;
+    int height = layout.height;
+
+    uint16_t frameMode = FM_NONE;
+    if (forceFrameCount > 100) frameMode = FM_FULL;
+    else if (lastFrameMode == FM_CHECKER) frameMode = FM_CHECKER_COMPL;
+
+    int16_t numSq = 0;
+    if (!lastImage) {
+        lastImage = (unsigned char *) malloc(width * height * 3);
+        memcpy(lastImage, frameData, width * height * 3);
+        frameMode = FM_FULL;
+    } else if ((frameMode != FM_FULL) && (frameMode != FM_CHECKER_COMPL)) {
+        numSq = imageDiff((unsigned char *)frameData, width, height);
+        if (numSq > (((240 / 8) * (320 / 8)) / 3)) frameMode = FM_CHECKER;
+        else if (numSq > 0) frameMode = FM_DIFF;
+        else frameMode = FM_NONE;
+    }
+    lastFrameMode = frameMode;
+
+    if (frameMode == FM_NONE) {
+        socketSend(sock, (const char *)&frameMode, 2);
+        forceFrameCount+=1;
+    }
+    if (frameMode == FM_FULL) {
+        const char *jpgBuf = jpegCompress((unsigned char *)frameData, width, height, 70, &outBuf, &outSize);
+        uint16_t dataSize = outSize;
+        socketSend(sock, (const char *)&frameMode, 2);
+        socketSend(sock, (const char *)&dataSize, 2);
+        socketSend(sock, jpgBuf, dataSize);
+        forceFrameCount = 0;
+    } else if (frameMode == FM_DIFF) {
+        const char *jpgDiffBuf = jpegCompress((unsigned char *) diffBuf, 8, 8 * numSq, 70, &outDiffBuf, &outDiffSize);
+        uint16_t dataSize = outDiffSize;
+        socketSend(sock, (const char *)&frameMode, 2);
+        socketSend(sock, (const char *)&dataSize, 2);
+        socketSend(sock, (const char *)diffMap, sizeof(diffMap));
+        socketSend(sock, jpgDiffBuf, dataSize);
+        forceFrameCount += 5;
+    } else if ((frameMode == FM_CHECKER) || (frameMode == FM_CHECKER_COMPL)) {
+        char buf[width * height * 3 / 2];
+        char *in = frameData;
+        char *out = buf;
+
+        int skip = checker;
+        for (int j=0; j<height; j++) {
+            for (int i=0; i<width; i++) {
+                if (!skip) {
+                    out[0] = in[0];
+                    out[1] = in[1];
+                    out[2] = in[2];
+                    out+=3;
+                }
+                in+=3;
+                skip = !skip;
+            }
+            skip = !skip;
+        }
+        const char *jpgBuf = jpegCompress((unsigned char *)buf, width/2, height, 70, &outBuf, &outSize);
+
+        uint16_t dataType = 3+checker;
+        uint16_t dataSize = outSize;
+        socketSend(sock, (const char *)&dataType, 2);
+        socketSend(sock, (const char *)&dataSize, 2);
+        socketSend(sock, jpgBuf, dataSize);
+        checker = (checker+1) & 1;
+        forceFrameCount+=3;
+    }
+
+    return readConfirmation(sock);
+}
+
+void GRenderWindow::ConnectCTroll3D(const QString& address) {
+    const Layout::FramebufferLayout layout{Layout::CustomFrameLayout(240, 320)};
+    screen_image = QImage(QSize(layout.width, layout.height), QImage::Format_RGB888);
+
+    VideoCore::RequestCTroll3D(
+        screen_image.bits(),
+        [=](char *frameData)->uint8_t {
+            return GRenderWindow::processFrameData(layout, frameData, address);
+            // static int hasFuture = 0;
+            // static std::future<int> future;
+            // int waiting = 1;
+            //
+            // if (hasFuture) {
+            //     std::future_status status = future.wait_for(std::chrono::seconds(0));
+            //     if (status == std::future_status::ready) {
+            //         waiting = future.get();
+            //         future = std::async(std::launch::async, GRenderWindow::processFrameData, layout, frameData, address);
+            //     }
+            // } else {
+            //     waiting = 0;
+            //     future = std::async(std::launch::async, GRenderWindow::processFrameData, layout, frameData, address);
+            // }
+            // hasFuture = 1;
+            //
+            // return waiting;
+        },
+        address.toStdString().c_str(),
+        layout
+    );
+}
+
 void GRenderWindow::OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) {
     setMinimumSize(minimal_size.first, minimal_size.second);
 }
