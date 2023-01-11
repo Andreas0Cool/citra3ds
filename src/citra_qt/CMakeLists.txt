@@ -88,6 +88,8 @@ add_executable(citra-qt
     configuration/configure_web.cpp
     configuration/configure_web.h
     configuration/configure_web.ui
+    ctroll3d/qt_ctroll3d.cpp
+    ctroll3d/qt_ctroll3d.h
     debugger/console.h
     debugger/console.cpp
     debugger/graphics/graphics.cpp
