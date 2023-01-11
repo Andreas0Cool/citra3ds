@@ -332,12 +332,17 @@ struct ScreenRectVertex {
  * @param flipped Whether the frame should be flipped upside down.
  */
 static std::array<GLfloat, 3 * 2> MakeOrthographicMatrix(const float width, const float height,
-                                                         bool flipped) {
-
+                                                         bool flipped, bool vflipped = false) {
+    
     std::array<GLfloat, 3 * 2> matrix; // Laid out in column-major order
 
     // Last matrix row is implicitly assumed to be [0, 0, 1].
-    if (flipped) {
+    if (vflipped) {
+        // clang-format off
+        matrix[0] = -2.f / width; matrix[2] = 0.f;           matrix[4] = 1.f;
+        matrix[1] = 0.f;         matrix[3] = -2.f / height;  matrix[5] = 1.f;
+        // clang-format on
+    } else if (flipped) {
         // clang-format off
         matrix[0] = 2.f / width; matrix[2] = 0.f;           matrix[4] = -1.f;
         matrix[1] = 0.f;         matrix[3] = 2.f / height;  matrix[5] = -1.f;
@@ -367,6 +372,15 @@ RendererOpenGL::~RendererOpenGL() = default;
 MICROPROFILE_DEFINE(OpenGL_RenderFrame, "OpenGL", "Render Frame", MP_RGB(128, 128, 64));
 MICROPROFILE_DEFINE(OpenGL_WaitPresent, "OpenGL", "Wait For Present", MP_RGB(128, 128, 128));
 
+#include <sys/time.h>
+
+double diffT(struct timeval *t1, struct timeval *t2) {
+    double diffSec = (double)t2->tv_sec - (double)t1->tv_sec;
+    double diffUSec = (double)t2->tv_usec - (double)t1->tv_usec;
+    return diffSec + diffUSec / 1000000.0;
+}
+
+
 /// Swap buffers (render frame)
 void RendererOpenGL::SwapBuffers() {
     // Maintain the rasterizer's state as a priority
@@ -395,6 +409,8 @@ void RendererOpenGL::SwapBuffers() {
             LOG_DEBUG(Render_OpenGL, "Frame dumper exception caught: {}", exception.what());
         }
     }
+
+    RenderCTroll3D();
 
     m_current_frame++;
 
@@ -445,6 +461,170 @@ void RendererOpenGL::RenderScreenshot() {
 
         VideoCore::g_screenshot_complete_callback();
         VideoCore::g_renderer_screenshot_requested = false;
+    }
+}
+
+#define PBO_SZ 2
+
+#if PBO_SZ >= 2
+GLuint pbo[PBO_SZ];
+GLuint mCurrentPboIndex = 0;
+GLuint mNextPboIndex = 1;
+int mSkipFirstFrame = 0;
+
+void initPBO() {
+    static int init = 1;
+
+    if (init) {
+        glGenBuffers(PBO_SZ, pbo);
+        for (int i = 0; i < PBO_SZ; i++) {
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[i]);
+            glBufferData(GL_PIXEL_PACK_BUFFER, 240 * 320 * 3, 0, GL_STREAM_READ/*GL_STATIC_READ*/);
+        }
+        init = 0;
+    }
+}
+
+int skipMap = PBO_SZ;
+char *readPixelsFromPBO()
+{
+    char *data = 0;
+
+    // Bind the current buffer
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[mCurrentPboIndex]);
+    // Read pixels into the bound buffer
+    glReadPixels(0, 0, 240, 320, GL_RGB, GL_UNSIGNED_BYTE, 0);
+
+    if (!skipMap) {
+        // Bind the next buffer
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo[mNextPboIndex]);
+        // Map to buffer to a byte buffer, this is our pixel data
+//        data = (char *) glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, 240 * 320 * 3, GL_MAP_READ_BIT);
+        data = (char *) glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+    } else {
+        skipMap--;
+    }
+
+    mCurrentPboIndex = (mCurrentPboIndex + 1) % PBO_SZ;
+    mNextPboIndex = (mCurrentPboIndex + 1) % PBO_SZ;
+
+    return data;
+}
+
+void unbindPBO() {
+    // Unmap the buffers
+    glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, GL_NONE);
+}
+#endif
+
+void RendererOpenGL::RenderCTroll3D() {
+    static int waitingConfirmation = 0;
+    static int inited = 0;
+    static GLuint renderbuffer;
+
+    if (!inited) {
+        inited = 1;
+        screen_framebuffer.Create();
+        glGenRenderbuffers(1, &renderbuffer);
+    }
+
+    if (!VideoCore::g_ctroll3d_addr) return;
+
+#define ADJUST_FRAMES 20
+    int skip = 0;
+    static double lastFPS = 30;
+    static int frame = -1;
+    static uint8_t sentFrame = 0;
+    static uint8_t remoteFrame = 0;
+    static float skipRate = 0.2;
+    static float skipCount = 0;
+    static struct timeval lastTime;
+
+    if (frame == -1) {
+        gettimeofday(&lastTime, 0);
+        frame = 0;
+    }
+
+    if (frame == ADJUST_FRAMES) {
+        struct timeval time;
+        gettimeofday(&time, 0);
+        double fps = ADJUST_FRAMES / diffT(&lastTime, &time);
+        lastTime = time;
+        if (fps < lastFPS) {
+            lastFPS--;
+            skipRate -= 0.1;
+            if (skipRate < 0.05) skipRate = 0.05;
+            if ((fps - 1) > lastFPS) lastFPS = fps - 1;
+        } else {
+            lastFPS = fps-1;
+            skipRate += 0.05;
+            if (skipRate > 0.99) skipRate = 0.99;
+        }
+        if (lastFPS > 58.5) lastFPS = 58.5;
+        frame = 0;
+    }
+    frame++;
+
+    int dFrame = (sentFrame >= remoteFrame) ? sentFrame-remoteFrame : sentFrame+256-remoteFrame;
+    if (dFrame > 4) {
+        Layout::FramebufferLayout layout;
+        uint8_t rf = VideoCore::g_ctroll3d_complete_callback(0);
+        if (rf) remoteFrame = rf;
+        if(dFrame > 4) {
+            skip = 1;
+            printf("FRAME %d, REMOTE %d     DIFF %d\n", sentFrame, remoteFrame, dFrame);
+        }
+    }
+
+    skipCount += skipRate;
+    if (skipCount < 1.0) {
+        skip = 1;
+    } else {
+        skipCount -= 1.0;
+    }
+
+    if (VideoCore::g_ctroll3d_addr && !skip) {
+        state.draw.read_framebuffer = state.draw.draw_framebuffer = screen_framebuffer.handle;
+        state.Apply();
+
+        Layout::FramebufferLayout layout{VideoCore::g_ctroll3d_framebuffer_layout};
+
+        glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB8, layout.width, layout.height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                                    renderbuffer);
+#if PBO_SZ >= 2
+        initPBO();
+#endif
+        layout.top_screen_enabled = false;
+        layout.bottom_screen.top = layout.top_screen.top = 0;
+        layout.bottom_screen.left = layout.top_screen.left = 0;
+        layout.bottom_screen.bottom = layout.top_screen.bottom = layout.height;
+        layout.bottom_screen.right = layout.top_screen.right = layout.width;
+
+#if PBO_SZ >= 2
+        char *data = readPixelsFromPBO();
+
+        if (data) {
+            uint8_t rf = VideoCore::g_ctroll3d_complete_callback((char *)data);
+            if (rf) remoteFrame = rf;
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+        } else {
+            uint8_t rf = VideoCore::g_ctroll3d_complete_callback((char *)VideoCore::g_ctroll3d_bits);
+            if (rf) remoteFrame = rf;
+        }
+        sentFrame++;
+#endif
+        DrawCTroll3DBottomScreen(layout);
+#if PBO_SZ >= 2
+//        unbindPBO();
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, GL_NONE);
+#else
+        glReadPixels(layout.bottom_screen.left, 0, layout.width, layout.height, GL_RGB, GL_UNSIGNED_BYTE,
+                     VideoCore::g_ctroll3d_bits);
+        waitingConfirmation = VideoCore::g_ctroll3d_complete_callback((char *)VideoCore::g_ctroll3d_bits);
+#endif
     }
 }
 
@@ -528,9 +708,11 @@ void RendererOpenGL::RenderToMailbox(const Layout::FramebufferLayout& layout,
         state.draw.draw_framebuffer = frame->render.handle;
         state.Apply();
         DrawScreens(layout, flipped);
+        
         // Create a fence for the frontend to wait on and swap this frame to OffTex
         frame->render_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         glFlush();
+        
         mailbox->ReleaseRenderFrame(frame);
     }
 }
@@ -1132,6 +1314,49 @@ void RendererOpenGL::DrawScreens(const Layout::FramebufferLayout& layout, bool f
             }
         }
     }
+}
+
+/**
+ * Draws the emulated screens to the emulator window.
+ */
+void RendererOpenGL::DrawCTroll3DBottomScreen(const Layout::FramebufferLayout& layout) {
+    if (VideoCore::g_renderer_bg_color_update_requested.exchange(false)) {
+        // Update background color before drawing
+        glClearColor(Settings::values.bg_red, Settings::values.bg_green, Settings::values.bg_blue,
+                     0.0f);
+    }
+
+    if (VideoCore::g_renderer_sampler_update_requested.exchange(false)) {
+        // Set the new filtering mode for the sampler
+        ReloadSampler();
+    }
+
+    if (VideoCore::g_renderer_shader_update_requested.exchange(false)) {
+        // Update fragment shader before drawing
+        shader.Release();
+        // Link shaders and get variable locations
+        ReloadShader();
+    }
+
+    const auto& top_screen = layout.top_screen;
+    const auto& bottom_screen = layout.bottom_screen;
+
+    glViewport(0, 0, layout.width, layout.height);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Set projection matrix
+    std::array<GLfloat, 3 * 2> ortho_matrix =
+        MakeOrthographicMatrix((float)layout.width, (float)layout.height, false, true);
+    glUniformMatrix3x2fv(uniform_modelview_matrix, 1, GL_FALSE, ortho_matrix.data());
+
+    // Bind texture in Texture Unit 0
+    glUniform1i(uniform_color_texture, 0);
+
+    glUniform1i(uniform_layer, 0);
+
+    DrawSingleScreen(screen_infos[2], (float)bottom_screen.left,
+                      (float)bottom_screen.top, (float)bottom_screen.GetWidth(),
+                      (float)bottom_screen.GetHeight());
 }
 
 void RendererOpenGL::TryPresent(int timeout_ms, bool is_secondary) {
